@@ -270,7 +270,9 @@ type ServerProperties struct {
 // Disk holds Disk information
 type Disk struct {
 	Endpoint        string  `json:"endpoint,omitempty"`
+	RootDisk        bool    `json:"rootDisk,omitempty"`
 	DrivePath       string  `json:"path,omitempty"`
+	Healing         bool    `json:"healing,omitempty"`
 	State           string  `json:"state,omitempty"`
 	UUID            string  `json:"uuid,omitempty"`
 	Model           string  `json:"model,omitempty"`

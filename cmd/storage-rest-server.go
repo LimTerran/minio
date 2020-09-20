@@ -106,6 +106,7 @@ func (s *storageRESTServer) IsValid(w http.ResponseWriter, r *http.Request) bool
 		s.writeErrorResponse(w, err)
 		return false
 	}
+
 	diskID := r.URL.Query().Get(storageRESTDiskID)
 	if diskID == "" {
 		// Request sent empty disk-id, we allow the request
@@ -113,13 +114,20 @@ func (s *storageRESTServer) IsValid(w http.ResponseWriter, r *http.Request) bool
 		// or create format.json
 		return true
 	}
+
 	storedDiskID, err := s.storage.GetDiskID()
-	if err == nil && diskID == storedDiskID {
-		// If format.json is available and request sent the right disk-id, we allow the request
-		return true
+	if err != nil {
+		s.writeErrorResponse(w, err)
+		return false
 	}
-	s.writeErrorResponse(w, errDiskStale)
-	return false
+
+	if diskID != storedDiskID {
+		s.writeErrorResponse(w, errDiskStale)
+		return false
+	}
+
+	// If format.json is available and request sent the right disk-id, we allow the request
+	return true
 }
 
 // HealthHandler handler checks if disk is stale
@@ -132,7 +140,7 @@ func (s *storageRESTServer) DiskInfoHandler(w http.ResponseWriter, r *http.Reque
 	if !s.IsValid(w, r) {
 		return
 	}
-	info, err := s.storage.DiskInfo()
+	info, err := s.storage.DiskInfo(r.Context())
 	if err != nil {
 		info.Error = err.Error()
 	}
@@ -145,7 +153,8 @@ func (s *storageRESTServer) CrawlAndGetDataUsageHandler(w http.ResponseWriter, r
 		return
 	}
 
-	w.Header().Set(xhttp.ContentType, "text/event-stream")
+	setEventStreamHeaders(w)
+
 	var cache dataUsageCache
 	err := cache.deserialize(r.Body)
 	if err != nil {
@@ -172,7 +181,7 @@ func (s *storageRESTServer) MakeVolHandler(w http.ResponseWriter, r *http.Reques
 	}
 	vars := mux.Vars(r)
 	volume := vars[storageRESTVolume]
-	err := s.storage.MakeVol(volume)
+	err := s.storage.MakeVol(r.Context(), volume)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -185,7 +194,7 @@ func (s *storageRESTServer) MakeVolBulkHandler(w http.ResponseWriter, r *http.Re
 	}
 	vars := mux.Vars(r)
 	volumes := strings.Split(vars[storageRESTVolumes], ",")
-	err := s.storage.MakeVolBulk(volumes...)
+	err := s.storage.MakeVolBulk(r.Context(), volumes...)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -196,7 +205,7 @@ func (s *storageRESTServer) ListVolsHandler(w http.ResponseWriter, r *http.Reque
 	if !s.IsValid(w, r) {
 		return
 	}
-	infos, err := s.storage.ListVols()
+	infos, err := s.storage.ListVols(r.Context())
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -212,7 +221,7 @@ func (s *storageRESTServer) StatVolHandler(w http.ResponseWriter, r *http.Reques
 	}
 	vars := mux.Vars(r)
 	volume := vars[storageRESTVolume]
-	info, err := s.storage.StatVol(volume)
+	info, err := s.storage.StatVol(r.Context(), volume)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -229,7 +238,7 @@ func (s *storageRESTServer) DeleteVolHandler(w http.ResponseWriter, r *http.Requ
 	vars := mux.Vars(r)
 	volume := vars[storageRESTVolume]
 	forceDelete := vars[storageRESTForceDelete] == "true"
-	err := s.storage.DeleteVol(volume, forceDelete)
+	err := s.storage.DeleteVol(r.Context(), volume, forceDelete)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -250,7 +259,7 @@ func (s *storageRESTServer) AppendFileHandler(w http.ResponseWriter, r *http.Req
 		s.writeErrorResponse(w, err)
 		return
 	}
-	err = s.storage.AppendFile(volume, filePath, buf)
+	err = s.storage.AppendFile(r.Context(), volume, filePath, buf)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -271,7 +280,7 @@ func (s *storageRESTServer) CreateFileHandler(w http.ResponseWriter, r *http.Req
 		s.writeErrorResponse(w, err)
 		return
 	}
-	err = s.storage.CreateFile(volume, filePath, int64(fileSize), r.Body)
+	err = s.storage.CreateFile(r.Context(), volume, filePath, int64(fileSize), r.Body)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -297,7 +306,7 @@ func (s *storageRESTServer) DeleteVersionHandler(w http.ResponseWriter, r *http.
 		return
 	}
 
-	err := s.storage.DeleteVersion(volume, filePath, fi)
+	err := s.storage.DeleteVersion(r.Context(), volume, filePath, fi)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -313,7 +322,7 @@ func (s *storageRESTServer) ReadVersionHandler(w http.ResponseWriter, r *http.Re
 	filePath := vars[storageRESTFilePath]
 	versionID := vars[storageRESTVersionID]
 
-	fi, err := s.storage.ReadVersion(volume, filePath, versionID)
+	fi, err := s.storage.ReadVersion(r.Context(), volume, filePath, versionID)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -344,7 +353,7 @@ func (s *storageRESTServer) WriteMetadataHandler(w http.ResponseWriter, r *http.
 		return
 	}
 
-	err = s.storage.WriteMetadata(volume, filePath, fi)
+	err = s.storage.WriteMetadata(r.Context(), volume, filePath, fi)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -364,7 +373,7 @@ func (s *storageRESTServer) WriteAllHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	err := s.storage.WriteAll(volume, filePath, io.LimitReader(r.Body, r.ContentLength))
+	err := s.storage.WriteAll(r.Context(), volume, filePath, io.LimitReader(r.Body, r.ContentLength))
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -390,7 +399,7 @@ func (s *storageRESTServer) CheckPartsHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if err := s.storage.CheckParts(volume, filePath, fi); err != nil {
+	if err := s.storage.CheckParts(r.Context(), volume, filePath, fi); err != nil {
 		s.writeErrorResponse(w, err)
 	}
 }
@@ -404,7 +413,7 @@ func (s *storageRESTServer) CheckFileHandler(w http.ResponseWriter, r *http.Requ
 	volume := vars[storageRESTVolume]
 	filePath := vars[storageRESTFilePath]
 
-	if err := s.storage.CheckFile(volume, filePath); err != nil {
+	if err := s.storage.CheckFile(r.Context(), volume, filePath); err != nil {
 		s.writeErrorResponse(w, err)
 	}
 }
@@ -418,7 +427,7 @@ func (s *storageRESTServer) ReadAllHandler(w http.ResponseWriter, r *http.Reques
 	volume := vars[storageRESTVolume]
 	filePath := vars[storageRESTFilePath]
 
-	buf, err := s.storage.ReadAll(volume, filePath)
+	buf, err := s.storage.ReadAll(r.Context(), volume, filePath)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -462,7 +471,7 @@ func (s *storageRESTServer) ReadFileHandler(w http.ResponseWriter, r *http.Reque
 		verifier = NewBitrotVerifier(BitrotAlgorithmFromString(vars[storageRESTBitrotAlgo]), hash)
 	}
 	buf := make([]byte, length)
-	_, err = s.storage.ReadFile(volume, filePath, int64(offset), buf, verifier)
+	_, err = s.storage.ReadFile(r.Context(), volume, filePath, int64(offset), buf, verifier)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -491,7 +500,7 @@ func (s *storageRESTServer) ReadFileStreamHandler(w http.ResponseWriter, r *http
 		return
 	}
 
-	rc, err := s.storage.ReadFileStream(volume, filePath, int64(offset), int64(length))
+	rc, err := s.storage.ReadFileStream(r.Context(), volume, filePath, int64(offset), int64(length))
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -514,10 +523,10 @@ func (s *storageRESTServer) WalkSplunkHandler(w http.ResponseWriter, r *http.Req
 	dirPath := vars[storageRESTDirPath]
 	markerPath := vars[storageRESTMarkerPath]
 
-	w.Header().Set(xhttp.ContentType, "text/event-stream")
+	setEventStreamHeaders(w)
 	encoder := gob.NewEncoder(w)
 
-	fch, err := s.storage.WalkSplunk(volume, dirPath, markerPath, r.Context().Done())
+	fch, err := s.storage.WalkSplunk(r.Context(), volume, dirPath, markerPath, r.Context().Done())
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -542,10 +551,10 @@ func (s *storageRESTServer) WalkVersionsHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	w.Header().Set(xhttp.ContentType, "text/event-stream")
+	setEventStreamHeaders(w)
 	encoder := gob.NewEncoder(w)
 
-	fch, err := s.storage.WalkVersions(volume, dirPath, markerPath, recursive, r.Context().Done())
+	fch, err := s.storage.WalkVersions(r.Context(), volume, dirPath, markerPath, recursive, r.Context().Done())
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -570,10 +579,10 @@ func (s *storageRESTServer) WalkHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	w.Header().Set(xhttp.ContentType, "text/event-stream")
+	setEventStreamHeaders(w)
 	encoder := gob.NewEncoder(w)
 
-	fch, err := s.storage.Walk(volume, dirPath, markerPath, recursive, r.Context().Done())
+	fch, err := s.storage.Walk(r.Context(), volume, dirPath, markerPath, recursive, r.Context().Done())
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -597,7 +606,7 @@ func (s *storageRESTServer) ListDirHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	entries, err := s.storage.ListDir(volume, dirPath, count)
+	entries, err := s.storage.ListDir(r.Context(), volume, dirPath, count)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -615,7 +624,7 @@ func (s *storageRESTServer) DeleteFileHandler(w http.ResponseWriter, r *http.Req
 	volume := vars[storageRESTVolume]
 	filePath := vars[storageRESTFilePath]
 
-	err := s.storage.DeleteFile(volume, filePath)
+	err := s.storage.DeleteFile(r.Context(), volume, filePath)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -653,10 +662,10 @@ func (s *storageRESTServer) DeleteVersionsHandler(w http.ResponseWriter, r *http
 
 	dErrsResp := &DeleteVersionsErrsResp{Errs: make([]error, totalVersions)}
 
-	w.Header().Set(xhttp.ContentType, "text/event-stream")
+	setEventStreamHeaders(w)
 	encoder := gob.NewEncoder(w)
 	done := keepHTTPResponseAlive(w)
-	errs := s.storage.DeleteVersions(volume, versions)
+	errs := s.storage.DeleteVersions(r.Context(), volume, versions)
 	done(nil)
 	for idx := range versions {
 		if errs[idx] != nil {
@@ -678,7 +687,7 @@ func (s *storageRESTServer) RenameDataHandler(w http.ResponseWriter, r *http.Req
 	dataDir := vars[storageRESTDataDir]
 	dstVolume := vars[storageRESTDstVolume]
 	dstFilePath := vars[storageRESTDstPath]
-	err := s.storage.RenameData(srcVolume, srcFilePath, dataDir, dstVolume, dstFilePath)
+	err := s.storage.RenameData(r.Context(), srcVolume, srcFilePath, dataDir, dstVolume, dstFilePath)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -694,7 +703,7 @@ func (s *storageRESTServer) RenameFileHandler(w http.ResponseWriter, r *http.Req
 	srcFilePath := vars[storageRESTSrcPath]
 	dstVolume := vars[storageRESTDstVolume]
 	dstFilePath := vars[storageRESTDstPath]
-	err := s.storage.RenameFile(srcVolume, srcFilePath, dstVolume, dstFilePath)
+	err := s.storage.RenameFile(r.Context(), srcVolume, srcFilePath, dstVolume, dstFilePath)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -799,10 +808,10 @@ func (s *storageRESTServer) VerifyFileHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	w.Header().Set(xhttp.ContentType, "text/event-stream")
+	setEventStreamHeaders(w)
 	encoder := gob.NewEncoder(w)
 	done := keepHTTPResponseAlive(w)
-	err = s.storage.VerifyFile(volume, filePath, fi)
+	err = s.storage.VerifyFile(r.Context(), volume, filePath, fi)
 	done(nil)
 	vresp := &VerifyFileResp{}
 	if err != nil {
@@ -819,23 +828,34 @@ func registerStorageRESTHandlers(router *mux.Router, endpointZones EndpointZones
 			if !endpoint.IsLocal {
 				continue
 			}
-			storage, err := newXLStorage(endpoint.Path, endpoint.Host)
+			storage, err := newXLStorage(endpoint)
 			if err != nil {
-				if err == errMinDiskSize {
+				switch err {
+				case errMinDiskSize:
 					logger.Fatal(config.ErrUnableToWriteInBackend(err).Hint(err.Error()), "Unable to initialize backend")
-				} else if err == errUnsupportedDisk {
-					hint := fmt.Sprintf("'%s' does not support O_DIRECT flags, refusing to use", endpoint.Path)
+				case errUnsupportedDisk:
+					hint := fmt.Sprintf("'%s' does not support O_DIRECT flags, MinIO erasure coding requires filesystems with O_DIRECT support", endpoint.Path)
 					logger.Fatal(config.ErrUnsupportedBackend(err).Hint(hint), "Unable to initialize backend")
+				case errDiskNotDir:
+					hint := fmt.Sprintf("'%s' MinIO erasure coding needs a directory", endpoint.Path)
+					logger.Fatal(config.ErrUnableToWriteInBackend(err).Hint(hint), "Unable to initialize backend")
+				case errFileAccessDenied:
+					// Show a descriptive error with a hint about how to fix it.
+					var username string
+					if u, err := user.Current(); err == nil {
+						username = u.Username
+					} else {
+						username = "<your-username>"
+					}
+					hint := fmt.Sprintf("Run the following command to add write permissions: `sudo chown -R %s %s && sudo chmod u+rxw %s`", username, endpoint.Path, endpoint.Path)
+					logger.Fatal(config.ErrUnableToWriteInBackend(err).Hint(hint), "Unable to initialize posix backend")
+				case errFaultyDisk:
+					logger.LogIf(GlobalContext, fmt.Errorf("disk is faulty at %s, please replace the drive", endpoint))
+				case errDiskFull:
+					logger.LogIf(GlobalContext, fmt.Errorf("disk is already full at %s, incoming I/O will fail", endpoint))
+				default:
+					logger.LogIf(GlobalContext, fmt.Errorf("disk returned an unexpected error at %s, please investigate", endpoint))
 				}
-				// Show a descriptive error with a hint about how to fix it.
-				var username string
-				if u, err := user.Current(); err == nil {
-					username = u.Username
-				} else {
-					username = "<your-username>"
-				}
-				hint := fmt.Sprintf("Run the following command to add the convenient permissions: `sudo chown -R %s %s && sudo chmod u+rxw %s`", username, endpoint.Path, endpoint.Path)
-				logger.Fatal(config.ErrUnableToWriteInBackend(err).Hint(hint), "Unable to initialize posix backend")
 			}
 
 			server := &storageRESTServer{storage: storage}

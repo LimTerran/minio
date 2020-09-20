@@ -19,11 +19,12 @@ package cmd
 import (
 	"context"
 	"net/http"
+	"strconv"
 )
 
 // ClusterCheckHandler returns if the server is ready for requests.
 func ClusterCheckHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := newContext(r, w, "ClusterCheckCheckHandler")
+	ctx := newContext(r, w, "ClusterCheckHandler")
 
 	objLayer := newObjectLayerFn()
 	// Service not initialized yet
@@ -35,11 +36,26 @@ func ClusterCheckHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(ctx, globalAPIConfig.getReadyDeadline())
 	defer cancel()
 
-	if !objLayer.IsReady(ctx) {
-		writeResponse(w, http.StatusServiceUnavailable, nil, mimeNone)
+	opts := HealthOptions{Maintenance: r.URL.Query().Get("maintenance") == "true"}
+	result := objLayer.Health(ctx, opts)
+	if result.WriteQuorum > 0 {
+		w.Header().Set("X-Minio-Write-Quorum", strconv.Itoa(result.WriteQuorum))
+	}
+	if !result.Healthy {
+		// return how many drives are being healed if any
+		if result.HealingDrives > 0 {
+			w.Header().Set("X-Minio-Healing-Drives", strconv.Itoa(result.HealingDrives))
+		}
+		// As a maintenance call we are purposefully asked to be taken
+		// down, this is for orchestrators to know if we can safely
+		// take this server down, return appropriate error.
+		if opts.Maintenance {
+			writeResponse(w, http.StatusPreconditionFailed, nil, mimeNone)
+		} else {
+			writeResponse(w, http.StatusServiceUnavailable, nil, mimeNone)
+		}
 		return
 	}
-
 	writeResponse(w, http.StatusOK, nil, mimeNone)
 }
 

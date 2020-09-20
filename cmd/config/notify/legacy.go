@@ -201,6 +201,14 @@ func SetNotifyES(s config.Config, esName string, cfg target.ElasticsearchArgs) e
 			Key:   target.ElasticQueueLimit,
 			Value: strconv.Itoa(int(cfg.QueueLimit)),
 		},
+		config.KV{
+			Key:   target.ElasticUsername,
+			Value: cfg.Username,
+		},
+		config.KV{
+			Key:   target.ElasticPassword,
+			Value: cfg.Password,
+		},
 	}
 
 	return nil
@@ -331,7 +339,7 @@ func SetNotifyPostgres(s config.Config, psqName string, cfg target.PostgreSQLArg
 		},
 		config.KV{
 			Key:   target.PostgresUsername,
-			Value: cfg.User,
+			Value: cfg.Username,
 		},
 		config.KV{
 			Key:   target.PostgresPassword,

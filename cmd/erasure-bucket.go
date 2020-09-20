@@ -20,13 +20,13 @@ import (
 	"context"
 	"sort"
 
-	"github.com/minio/minio-go/v6/pkg/s3utils"
+	"github.com/minio/minio-go/v7/pkg/s3utils"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/sync/errgroup"
 )
 
 // list all errors that can be ignore in a bucket operation.
-var bucketOpIgnoredErrs = append(baseIgnoredErrs, errDiskAccessDenied)
+var bucketOpIgnoredErrs = append(baseIgnoredErrs, errDiskAccessDenied, errUnformattedDisk)
 
 // list all errors that can be ignored in a bucket metadata operation.
 var bucketMetadataOpIgnoredErrs = append(bucketOpIgnoredErrs, errVolumeNotFound)
@@ -49,7 +49,7 @@ func (er erasureObjects) MakeBucketWithLocation(ctx context.Context, bucket stri
 		index := index
 		g.Go(func() error {
 			if storageDisks[index] != nil {
-				if err := storageDisks[index].MakeVol(bucket); err != nil {
+				if err := storageDisks[index].MakeVol(ctx, bucket); err != nil {
 					if err != errVolumeExists {
 						logger.LogIf(ctx, err)
 					}
@@ -75,7 +75,7 @@ func undoDeleteBucket(storageDisks []StorageAPI, bucket string) {
 		}
 		index := index
 		g.Go(func() error {
-			_ = storageDisks[index].MakeVol(bucket)
+			_ = storageDisks[index].MakeVol(context.Background(), bucket)
 			return nil
 		}, index)
 	}
@@ -92,7 +92,7 @@ func (er erasureObjects) getBucketInfo(ctx context.Context, bucketName string) (
 			bucketErrs = append(bucketErrs, errDiskNotFound)
 			continue
 		}
-		volInfo, serr := disk.StatVol(bucketName)
+		volInfo, serr := disk.StatVol(ctx, bucketName)
 		if serr == nil {
 			return BucketInfo(volInfo), nil
 		}
@@ -129,12 +129,11 @@ func (er erasureObjects) listBuckets(ctx context.Context) (bucketsInfo []BucketI
 			continue
 		}
 		var volsInfo []VolInfo
-		volsInfo, err = disk.ListVols()
+		volsInfo, err = disk.ListVols(ctx)
 		if err == nil {
 			// NOTE: The assumption here is that volumes across all disks in
 			// readQuorum have consistent view i.e they all have same number
-			// of buckets. This is essentially not verified since healing
-			// should take care of this.
+			// of buckets.
 			var bucketsInfo []BucketInfo
 			for _, volInfo := range volsInfo {
 				if isReservedOrInvalidBucket(volInfo.Name, true) {
@@ -182,10 +181,10 @@ func deleteDanglingBucket(ctx context.Context, storageDisks []StorageAPI, dErrs 
 	for index, err := range dErrs {
 		if err == errVolumeNotEmpty {
 			// Attempt to delete bucket again.
-			if derr := storageDisks[index].DeleteVol(bucket, false); derr == errVolumeNotEmpty {
+			if derr := storageDisks[index].DeleteVol(ctx, bucket, false); derr == errVolumeNotEmpty {
 				_ = cleanupDir(ctx, storageDisks[index], bucket, "")
 
-				_ = storageDisks[index].DeleteVol(bucket, false)
+				_ = storageDisks[index].DeleteVol(ctx, bucket, false)
 
 				// Cleanup all the previously incomplete multiparts.
 				_ = cleanupDir(ctx, storageDisks[index], minioMetaMultipartBucket, bucket)
@@ -205,7 +204,7 @@ func (er erasureObjects) DeleteBucket(ctx context.Context, bucket string, forceD
 		index := index
 		g.Go(func() error {
 			if storageDisks[index] != nil {
-				if err := storageDisks[index].DeleteVol(bucket, forceDelete); err != nil {
+				if err := storageDisks[index].DeleteVol(ctx, bucket, forceDelete); err != nil {
 					return err
 				}
 				err := cleanupDir(ctx, storageDisks[index], minioMetaMultipartBucket, bucket)
@@ -244,7 +243,10 @@ func (er erasureObjects) DeleteBucket(ctx context.Context, bucket string, forceD
 	// If we reduce quorum to nil, means we have deleted buckets properly
 	// on some servers in quorum, we should look for volumeNotEmpty errors
 	// and delete those buckets as well.
-	deleteDanglingBucket(ctx, storageDisks, dErrs, bucket)
+	//
+	// let this call succeed, even if client cancels the context
+	// this is to ensure that we don't leave any stale content
+	deleteDanglingBucket(context.Background(), storageDisks, dErrs, bucket)
 
 	return nil
 }
@@ -254,8 +256,8 @@ func (er erasureObjects) IsNotificationSupported() bool {
 	return true
 }
 
-// IsListenBucketSupported returns whether listen bucket notification is applicable for this layer.
-func (er erasureObjects) IsListenBucketSupported() bool {
+// IsListenSupported returns whether listen bucket notification is applicable for this layer.
+func (er erasureObjects) IsListenSupported() bool {
 	return true
 }
 

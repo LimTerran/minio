@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/minio/minio-go/v6/pkg/set"
+	"github.com/minio/minio-go/v7/pkg/set"
 )
 
 var serverPort uint32 = 60000
@@ -186,6 +186,10 @@ func TestHTTPListenerStartClose(t *testing.T) {
 			testCase.serverAddrs,
 		)
 		if err != nil {
+			if strings.Contains(err.Error(), "The requested address is not valid in its context") {
+				// Ignore if IP is unbindable.
+				continue
+			}
 			t.Fatalf("Test %d: error: expected = <nil>, got = %v", i+1, err)
 		}
 
@@ -225,6 +229,10 @@ func TestHTTPListenerAddr(t *testing.T) {
 			testCase.serverAddrs,
 		)
 		if err != nil {
+			if strings.Contains(err.Error(), "The requested address is not valid in its context") {
+				// Ignore if IP is unbindable.
+				continue
+			}
 			t.Fatalf("Test %d: error: expected = <nil>, got = %v", i+1, err)
 		}
 
@@ -261,6 +269,10 @@ func TestHTTPListenerAddrs(t *testing.T) {
 			testCase.serverAddrs,
 		)
 		if err != nil {
+			if strings.Contains(err.Error(), "The requested address is not valid in its context") {
+				// Ignore if IP is unbindable.
+				continue
+			}
 			t.Fatalf("Test %d: error: expected = <nil>, got = %v", i+1, err)
 		}
 

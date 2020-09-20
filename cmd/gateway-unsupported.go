@@ -22,7 +22,7 @@ import (
 
 	"github.com/minio/minio/cmd/logger"
 
-	"github.com/minio/minio-go/v6/pkg/tags"
+	"github.com/minio/minio-go/v7/pkg/tags"
 	bucketsse "github.com/minio/minio/pkg/bucket/encryption"
 	"github.com/minio/minio/pkg/bucket/lifecycle"
 	"github.com/minio/minio/pkg/bucket/policy"
@@ -44,6 +44,11 @@ func (a GatewayUnsupported) CrawlAndGetDataUsage(ctx context.Context, bf *bloomF
 func (a GatewayUnsupported) NewNSLock(ctx context.Context, bucket string, objects ...string) RWLocker {
 	logger.CriticalIf(ctx, errors.New("not implemented"))
 	return nil
+}
+
+// SetDriveCount no-op
+func (a GatewayUnsupported) SetDriveCount() int {
+	return 0
 }
 
 // ListMultipartUploads lists all multipart uploads.
@@ -86,7 +91,7 @@ func (a GatewayUnsupported) ListObjectParts(ctx context.Context, bucket string, 
 }
 
 // AbortMultipartUpload aborts a ongoing multipart upload
-func (a GatewayUnsupported) AbortMultipartUpload(ctx context.Context, bucket string, object string, uploadID string) error {
+func (a GatewayUnsupported) AbortMultipartUpload(ctx context.Context, bucket string, object string, uploadID string, opts ObjectOptions) error {
 	return NotImplemented{}
 }
 
@@ -230,8 +235,8 @@ func (a GatewayUnsupported) IsNotificationSupported() bool {
 	return false
 }
 
-// IsListenBucketSupported returns whether listen bucket notification is applicable for this layer.
-func (a GatewayUnsupported) IsListenBucketSupported() bool {
+// IsListenSupported returns whether listen bucket notification is applicable for this layer.
+func (a GatewayUnsupported) IsListenSupported() bool {
 	return false
 }
 
@@ -250,7 +255,7 @@ func (a GatewayUnsupported) IsCompressionSupported() bool {
 	return false
 }
 
-// IsReady - No Op.
-func (a GatewayUnsupported) IsReady(_ context.Context) bool {
-	return false
+// Health - No Op.
+func (a GatewayUnsupported) Health(_ context.Context, _ HealthOptions) HealthResult {
+	return HealthResult{}
 }

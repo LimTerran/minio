@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	jwtgo "github.com/dgrijalva/jwt-go"
@@ -49,10 +50,14 @@ type Config struct {
 	publicKeys   map[string]crypto.PublicKey
 	transport    *http.Transport
 	closeRespFn  func(io.ReadCloser)
+	mutex        *sync.Mutex
 }
 
 // PopulatePublicKey - populates a new publickey from the JWKS URL.
 func (r *Config) PopulatePublicKey() error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
 	if r.JWKS.URL == nil || r.JWKS.URL.String() == "" {
 		return nil
 	}
@@ -123,8 +128,8 @@ func GetDefaultExpiration(dsecs string) (time.Duration, error) {
 
 		// The duration, in seconds, of the role session.
 		// The value can range from 900 seconds (15 minutes)
-		// to 12 hours.
-		if expirySecs < 900 || expirySecs > 43200 {
+		// up to 7 days.
+		if expirySecs < 900 || expirySecs > 604800 {
 			return 0, auth.ErrInvalidDuration
 		}
 
@@ -185,6 +190,8 @@ func (p *JWT) Validate(token, dsecs string) (map[string]interface{}, error) {
 	var claims jwtgo.MapClaims
 	jwtToken, err := jp.ParseWithClaims(token, &claims, keyFuncCallback)
 	if err != nil {
+		// Re-populate the public key in-case the JWKS
+		// pubkeys are refreshed
 		if err = p.PopulatePublicKey(); err != nil {
 			return nil, err
 		}
@@ -203,7 +210,6 @@ func (p *JWT) Validate(token, dsecs string) (map[string]interface{}, error) {
 	}
 
 	return claims, nil
-
 }
 
 // ID returns the provider name and authentication type.
@@ -324,6 +330,7 @@ func LookupConfig(kvs config.KVS, transport *http.Transport, closeRespFn func(io
 		ClientID:    env.Get(EnvIdentityOpenIDClientID, kvs.Get(ClientID)),
 		transport:   transport,
 		closeRespFn: closeRespFn,
+		mutex:       &sync.Mutex{}, // allocate for copying
 	}
 
 	configURL := env.Get(EnvIdentityOpenIDURL, kvs.Get(ConfigURL))

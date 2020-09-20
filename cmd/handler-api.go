@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/minio/minio/cmd/config/api"
+	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/sys"
 )
 
 type apiConfig struct {
@@ -33,30 +35,43 @@ type apiConfig struct {
 	corsAllowOrigins []string
 }
 
-func (t *apiConfig) init(cfg api.Config) {
+func (t *apiConfig) init(cfg api.Config, setDriveCount int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.readyDeadline = cfg.APIReadyDeadline
-	t.corsAllowOrigins = cfg.APICorsAllowOrigin
-	if cfg.APIRequestsMax <= 0 {
-		return
+	t.readyDeadline = cfg.ReadyDeadline
+	t.corsAllowOrigins = cfg.CorsAllowOrigin
+
+	var apiRequestsMaxPerNode int
+	if cfg.RequestsMax <= 0 {
+		stats, err := sys.GetStats()
+		if err != nil {
+			logger.LogIf(GlobalContext, err)
+			// Default to 16 GiB, not critical.
+			stats.TotalRAM = 16 << 30
+		}
+		// max requests per node is calculated as
+		// total_ram / ram_per_request
+		// ram_per_request is 4MiB * setDriveCount + 2 * 10MiB (default erasure block size)
+		apiRequestsMaxPerNode = int(stats.TotalRAM / uint64(setDriveCount*readBlockSize+blockSizeV1*2))
+	} else {
+		apiRequestsMaxPerNode = cfg.RequestsMax
+		if len(globalEndpoints.Hostnames()) > 0 {
+			apiRequestsMaxPerNode /= len(globalEndpoints.Hostnames())
+		}
 	}
 
-	apiRequestsMax := cfg.APIRequestsMax
-	if len(globalEndpoints.Hosts()) > 0 {
-		apiRequestsMax /= len(globalEndpoints.Hosts())
-	}
-
-	t.requestsPool = make(chan struct{}, apiRequestsMax)
-	t.requestsDeadline = cfg.APIRequestsDeadline
+	t.requestsPool = make(chan struct{}, apiRequestsMaxPerNode)
+	t.requestsDeadline = cfg.RequestsDeadline
 }
 
 func (t *apiConfig) getCorsAllowOrigins() []string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	return t.corsAllowOrigins
+	corsAllowOrigins := make([]string, len(t.corsAllowOrigins))
+	copy(corsAllowOrigins, t.corsAllowOrigins)
+	return corsAllowOrigins
 }
 
 func (t *apiConfig) getReadyDeadline() time.Duration {

@@ -21,10 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/minio/minio-go/v6/pkg/set"
+	"github.com/minio/minio-go/v7/pkg/set"
 
 	humanize "github.com/dustin/go-humanize"
-	"github.com/minio/minio/cmd/config/etcd/dns"
+	"github.com/minio/minio/cmd/config/dns"
 	"github.com/minio/minio/cmd/crypto"
 	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/cmd/http/stats"
@@ -406,7 +406,6 @@ var supportedDummyBucketAPIs = map[string][]string{
 	"website":        {http.MethodGet, http.MethodDelete},
 	"logging":        {http.MethodGet},
 	"accelerate":     {http.MethodGet},
-	"replication":    {http.MethodGet},
 	"requestPayment": {http.MethodGet},
 }
 
@@ -418,7 +417,6 @@ var notImplementedBucketResourceNames = map[string]struct{}{
 	"logging":        {},
 	"inventory":      {},
 	"accelerate":     {},
-	"replication":    {},
 	"requestPayment": {},
 }
 

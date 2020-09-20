@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/minio/minio-go/v6/pkg/encrypt"
+	"github.com/minio/minio-go/v7/pkg/encrypt"
 	"github.com/minio/minio/cmd/crypto"
 	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/cmd/logger"
@@ -133,6 +133,7 @@ func delOpts(ctx context.Context, r *http.Request, bucket, object string) (opts 
 		return opts, err
 	}
 	opts.Versioned = versioned
+	opts.VersionSuspended = globalBucketVersioningSys.Suspended(bucket)
 	return opts, nil
 }
 
@@ -164,7 +165,13 @@ func putOpts(ctx context.Context, r *http.Request, bucket, object string, metada
 	} else {
 		opts.MTime = UTCNow()
 	}
-
+	etag := strings.TrimSpace(r.Header.Get(xhttp.MinIOSourceETag))
+	if etag != "" {
+		if metadata == nil {
+			metadata = make(map[string]string, 1)
+		}
+		metadata["etag"] = etag
+	}
 	// In the case of multipart custom format, the metadata needs to be checked in addition to header to see if it
 	// is SSE-S3 encrypted, primarily because S3 protocol does not require SSE-S3 headers in PutObjectPart calls
 	if GlobalGatewaySSE.SSES3() && (crypto.S3.IsRequested(r.Header) || crypto.S3.IsEncrypted(metadata)) {

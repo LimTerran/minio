@@ -35,10 +35,12 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gorilla/rpc/v2/json2"
 	"github.com/klauspost/compress/zip"
-	miniogopolicy "github.com/minio/minio-go/v6/pkg/policy"
-	"github.com/minio/minio-go/v6/pkg/s3utils"
+	"github.com/minio/minio-go/v7"
+	miniogo "github.com/minio/minio-go/v7"
+	miniogopolicy "github.com/minio/minio-go/v7/pkg/policy"
+	"github.com/minio/minio-go/v7/pkg/s3utils"
 	"github.com/minio/minio/browser"
-	"github.com/minio/minio/cmd/config/etcd/dns"
+	"github.com/minio/minio/cmd/config/dns"
 	"github.com/minio/minio/cmd/config/identity/openid"
 	"github.com/minio/minio/cmd/crypto"
 	xhttp "github.com/minio/minio/cmd/http"
@@ -46,6 +48,7 @@ import (
 	"github.com/minio/minio/pkg/auth"
 	objectlock "github.com/minio/minio/pkg/bucket/object/lock"
 	"github.com/minio/minio/pkg/bucket/policy"
+	"github.com/minio/minio/pkg/bucket/replication"
 	"github.com/minio/minio/pkg/event"
 	"github.com/minio/minio/pkg/handlers"
 	"github.com/minio/minio/pkg/hash"
@@ -176,11 +179,12 @@ func (web *webAPIHandlers) MakeBucket(r *http.Request, args *MakeBucketArgs, rep
 
 	if globalDNSConfig != nil {
 		if _, err := globalDNSConfig.Get(args.BucketName); err != nil {
-			if err == dns.ErrNoEntriesFound {
+			if err == dns.ErrNoEntriesFound || err == dns.ErrNotImplemented {
 				// Proceed to creating a bucket.
 				if err = objectAPI.MakeBucketWithLocation(ctx, args.BucketName, opts); err != nil {
 					return toJSONError(ctx, err)
 				}
+
 				if err = globalDNSConfig.Put(args.BucketName); err != nil {
 					objectAPI.DeleteBucket(ctx, args.BucketName, false)
 					return toJSONError(ctx, err)
@@ -199,6 +203,15 @@ func (web *webAPIHandlers) MakeBucket(r *http.Request, args *MakeBucketArgs, rep
 	}
 
 	reply.UIVersion = browser.UIVersion
+
+	sendEvent(eventArgs{
+		EventName:  event.BucketCreated,
+		BucketName: args.BucketName,
+		ReqParams:  extractReqParams(r),
+		UserAgent:  r.UserAgent(),
+		Host:       handlers.GetSourceIP(r),
+	})
+
 	return nil
 }
 
@@ -252,7 +265,7 @@ func (web *webAPIHandlers) DeleteBucket(r *http.Request, args *RemoveBucketArgs,
 		if err != nil {
 			return toJSONError(ctx, err, args.BucketName)
 		}
-		if err = core.RemoveBucket(args.BucketName); err != nil {
+		if err = core.RemoveBucket(ctx, args.BucketName); err != nil {
 			return toJSONError(ctx, err, args.BucketName)
 		}
 		return nil
@@ -268,10 +281,18 @@ func (web *webAPIHandlers) DeleteBucket(r *http.Request, args *RemoveBucketArgs,
 
 	if globalDNSConfig != nil {
 		if err := globalDNSConfig.Delete(args.BucketName); err != nil {
-			logger.LogIf(ctx, fmt.Errorf("Unable to delete bucket DNS entry %w, please delete it manually using etcdctl", err))
+			logger.LogIf(ctx, fmt.Errorf("Unable to delete bucket DNS entry %w, please delete it manually", err))
 			return toJSONError(ctx, err)
 		}
 	}
+
+	sendEvent(eventArgs{
+		EventName:  event.BucketRemoved,
+		BucketName: args.BucketName,
+		ReqParams:  extractReqParams(r),
+		UserAgent:  r.UserAgent(),
+		Host:       handlers.GetSourceIP(r),
+	})
 
 	return nil
 }
@@ -406,7 +427,7 @@ func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, r
 			}
 			return toJSONError(ctx, err, args.BucketName)
 		}
-		core, err := getRemoteInstanceClientLongTimeout(r, getHostFromSrv(sr))
+		core, err := getRemoteInstanceClient(r, getHostFromSrv(sr))
 		if err != nil {
 			return toJSONError(ctx, err, args.BucketName)
 		}
@@ -632,22 +653,24 @@ func (web *webAPIHandlers) RemoveObject(r *http.Request, args *RemoveObjectArgs,
 			}
 			return toJSONError(ctx, err, args.BucketName)
 		}
-		core, err := getRemoteInstanceClientLongTimeout(r, getHostFromSrv(sr))
+		core, err := getRemoteInstanceClient(r, getHostFromSrv(sr))
 		if err != nil {
 			return toJSONError(ctx, err, args.BucketName)
 		}
-		objectsCh := make(chan string)
+		objectsCh := make(chan miniogo.ObjectInfo)
 
 		// Send object names that are needed to be removed to objectsCh
 		go func() {
 			defer close(objectsCh)
 
 			for _, objectName := range args.Objects {
-				objectsCh <- objectName
+				objectsCh <- miniogo.ObjectInfo{
+					Key: objectName,
+				}
 			}
 		}()
 
-		for resp := range core.RemoveObjects(args.BucketName, objectsCh) {
+		for resp := range core.RemoveObjects(ctx, args.BucketName, objectsCh, minio.RemoveObjectsOptions{}) {
 			if resp.Err != nil {
 				return toJSONError(ctx, resp.Err, args.BucketName, resp.ObjectName)
 			}
@@ -656,7 +679,8 @@ func (web *webAPIHandlers) RemoveObject(r *http.Request, args *RemoveObjectArgs,
 	}
 
 	opts := ObjectOptions{
-		Versioned: globalBucketVersioningSys.Enabled(args.BucketName),
+		Versioned:        globalBucketVersioningSys.Enabled(args.BucketName),
+		VersionSuspended: globalBucketVersioningSys.Suspended(args.BucketName),
 	}
 	var err error
 next:
@@ -693,6 +717,7 @@ next:
 
 			_, err = deleteObject(ctx, objectAPI, web.CacheAPI(), args.BucketName, objectName, r, opts)
 			logger.LogIf(ctx, err)
+			continue
 		}
 
 		if authErr == errNoAuthToken {
@@ -938,6 +963,7 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 
 	retPerms := ErrAccessDenied
 	holdPerms := ErrAccessDenied
+	replPerms := ErrAccessDenied
 	if authErr != nil {
 		if authErr == errNoAuthToken {
 			// Check if anonymous (non-owner) has access to upload objects.
@@ -993,6 +1019,17 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 		}) {
 			holdPerms = ErrNone
 		}
+		if globalIAMSys.IsAllowed(iampolicy.Args{
+			AccountName:     claims.AccessKey,
+			Action:          iampolicy.GetReplicationConfigurationAction,
+			BucketName:      bucket,
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+			IsOwner:         owner,
+			ObjectName:      object,
+			Claims:          claims.Map(),
+		}) {
+			replPerms = ErrNone
+		}
 	}
 
 	// Check if bucket is a reserved bucket name or invalid.
@@ -1004,13 +1041,18 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	// Check if bucket encryption is enabled
 	_, err = globalBucketSSEConfigSys.Get(bucket)
 	if (globalAutoEncryption || err == nil) && !crypto.SSEC.IsRequested(r.Header) {
-		r.Header.Add(crypto.SSEHeader, crypto.SSEAlgorithmAES256)
+		r.Header.Set(crypto.SSEHeader, crypto.SSEAlgorithmAES256)
 	}
 
 	// Require Content-Length to be set in the request
 	size := r.ContentLength
 	if size < 0 {
 		writeWebErrorResponse(w, errSizeUnspecified)
+		return
+	}
+
+	if err := enforceBucketQuota(ctx, bucket, size); err != nil {
+		writeWebErrorResponse(w, err)
 		return
 	}
 
@@ -1054,6 +1096,10 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	mustReplicate := mustReplicateWeb(ctx, r, bucket, object, metadata, "", replPerms)
+	if mustReplicate {
+		metadata[xhttp.AmzBucketReplicationStatus] = string(replication.Pending)
+	}
 	pReader = NewPutObjReader(hashReader, nil, nil)
 	// get gateway encryption options
 	opts, err := putOpts(ctx, r, bucket, object, metadata)
@@ -1085,9 +1131,6 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	// Ensure that metadata does not contain sensitive information
 	crypto.RemoveSensitiveEntries(metadata)
 
-	retentionRequested := objectlock.IsObjectLockRetentionRequested(r.Header)
-	legalHoldRequested := objectlock.IsObjectLockLegalHoldRequested(r.Header)
-
 	putObject := objectAPI.PutObject
 	getObjectInfo := objectAPI.GetObjectInfo
 	if web.CacheAPI() != nil {
@@ -1095,20 +1138,15 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 		getObjectInfo = web.CacheAPI().GetObjectInfo
 	}
 
-	if retentionRequested || legalHoldRequested {
-		// enforce object retention rules
-		retentionMode, retentionDate, legalHold, s3Err := checkPutObjectLockAllowed(ctx, r, bucket, object, getObjectInfo, retPerms, holdPerms)
-		if s3Err == ErrNone && retentionMode != "" {
-			opts.UserDefined[xhttp.AmzObjectLockMode] = string(retentionMode)
-			opts.UserDefined[xhttp.AmzObjectLockRetainUntilDate] = retentionDate.UTC().Format(iso8601TimeFormat)
-		}
-		if s3Err == ErrNone && legalHold.Status != "" {
-			opts.UserDefined[xhttp.AmzObjectLockLegalHold] = string(legalHold.Status)
-		}
-		if s3Err != ErrNone {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL, guessIsBrowserReq(r))
-			return
-		}
+	// enforce object retention rules
+	retentionMode, retentionDate, _, s3Err := checkPutObjectLockAllowed(ctx, r, bucket, object, getObjectInfo, retPerms, holdPerms)
+	if s3Err != ErrNone {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL, guessIsBrowserReq(r))
+		return
+	}
+	if retentionMode != "" {
+		opts.UserDefined[xhttp.AmzObjectLockMode] = string(retentionMode)
+		opts.UserDefined[xhttp.AmzObjectLockRetainUntilDate] = retentionDate.UTC().Format(iso8601TimeFormat)
 	}
 
 	objInfo, err := putObject(GlobalContext, bucket, object, pReader, opts)
@@ -1126,6 +1164,9 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set(crypto.SSECKeyMD5, r.Header.Get(crypto.SSECKeyMD5))
 			}
 		}
+	}
+	if mustReplicate {
+		globalReplicationState.queueReplicaTask(objInfo)
 	}
 
 	// Notify object created event.
@@ -1265,7 +1306,7 @@ func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 	objInfo.UserDefined = objectlock.FilterObjectLockMetadata(objInfo.UserDefined, getRetPerms != ErrNone, legalHoldPerms != ErrNone)
 
 	if objectAPI.IsEncryptionSupported() {
-		if _, err = DecryptObjectInfo(&objInfo, r.Header); err != nil {
+		if _, err = DecryptObjectInfo(&objInfo, r); err != nil {
 			writeWebErrorResponse(w, err)
 			return
 		}
@@ -1618,7 +1659,7 @@ func (web *webAPIHandlers) GetBucketPolicy(r *http.Request, args *GetBucketPolic
 		if rerr != nil {
 			return toJSONError(ctx, rerr, args.BucketName)
 		}
-		policyStr, err := client.GetBucketPolicy(args.BucketName)
+		policyStr, err := client.GetBucketPolicy(ctx, args.BucketName)
 		if err != nil {
 			return toJSONError(ctx, rerr, args.BucketName)
 		}
@@ -1716,7 +1757,7 @@ func (web *webAPIHandlers) ListAllBucketPolicies(r *http.Request, args *ListAllB
 			return toJSONError(ctx, rerr, args.BucketName)
 		}
 		var policyStr string
-		policyStr, err = core.Client.GetBucketPolicy(args.BucketName)
+		policyStr, err = core.Client.GetBucketPolicy(ctx, args.BucketName)
 		if err != nil {
 			return toJSONError(ctx, err, args.BucketName)
 		}
@@ -1815,7 +1856,7 @@ func (web *webAPIHandlers) SetBucketPolicy(r *http.Request, args *SetBucketPolic
 		var policyStr string
 		// Use the abstracted API instead of core, such that
 		// NoSuchBucketPolicy errors are automatically handled.
-		policyStr, err = core.Client.GetBucketPolicy(args.BucketName)
+		policyStr, err = core.Client.GetBucketPolicy(ctx, args.BucketName)
 		if err != nil {
 			return toJSONError(ctx, err, args.BucketName)
 		}
@@ -1828,7 +1869,7 @@ func (web *webAPIHandlers) SetBucketPolicy(r *http.Request, args *SetBucketPolic
 
 		policyInfo.Statements = miniogopolicy.SetPolicy(policyInfo.Statements, policyType, args.BucketName, args.Prefix)
 		if len(policyInfo.Statements) == 0 {
-			if err = core.SetBucketPolicy(args.BucketName, ""); err != nil {
+			if err = core.SetBucketPolicy(ctx, args.BucketName, ""); err != nil {
 				return toJSONError(ctx, err, args.BucketName)
 			}
 			return nil
@@ -1845,7 +1886,7 @@ func (web *webAPIHandlers) SetBucketPolicy(r *http.Request, args *SetBucketPolic
 			return toJSONError(ctx, err, args.BucketName)
 		}
 
-		if err = core.SetBucketPolicy(args.BucketName, string(policyData)); err != nil {
+		if err = core.SetBucketPolicy(ctx, args.BucketName, string(policyData)); err != nil {
 			return toJSONError(ctx, err, args.BucketName)
 		}
 
@@ -1966,6 +2007,7 @@ func (web *webAPIHandlers) PresignedGet(r *http.Request, args *PresignedGetArgs,
 func presignedGet(host, bucket, object string, expiry int64, creds auth.Credentials, region string) string {
 	accessKey := creds.AccessKey
 	secretKey := creds.SecretKey
+	sessionToken := creds.SessionToken
 
 	date := UTCNow()
 	dateStr := date.Format(iso8601Format)
@@ -1981,6 +2023,10 @@ func presignedGet(host, bucket, object string, expiry int64, creds auth.Credenti
 	query.Set(xhttp.AmzCredential, credential)
 	query.Set(xhttp.AmzDate, dateStr)
 	query.Set(xhttp.AmzExpires, expiryStr)
+	// Set session token if available.
+	if sessionToken != "" {
+		query.Set(xhttp.AmzSecurityToken, sessionToken)
+	}
 	query.Set(xhttp.AmzSignedHeaders, "host")
 	queryStr := s3utils.QueryEncode(query)
 
@@ -1994,10 +2040,6 @@ func presignedGet(host, bucket, object string, expiry int64, creds auth.Credenti
 	signingKey := getSigningKey(secretKey, date, region, serviceS3)
 	signature := getSignature(signingKey, stringToSign)
 
-	// Construct the final presigned URL.
-	if creds.SessionToken != "" {
-		return host + s3utils.EncodePath(path) + "?" + queryStr + "&" + xhttp.AmzSignature + "=" + signature + "&" + xhttp.AmzSecurityToken + "=" + creds.SessionToken
-	}
 	return host + s3utils.EncodePath(path) + "?" + queryStr + "&" + xhttp.AmzSignature + "=" + signature
 }
 
@@ -2178,6 +2220,8 @@ func toWebAPIError(ctx context.Context, err error) APIError {
 	switch err.(type) {
 	case StorageFull:
 		return getAPIError(ErrStorageFull)
+	case BucketQuotaExceeded:
+		return getAPIError(ErrAdminBucketQuotaExceeded)
 	case BucketNotFound:
 		return getAPIError(ErrNoSuchBucket)
 	case BucketNotEmpty:
